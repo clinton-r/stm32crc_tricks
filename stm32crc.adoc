@@ -1,0 +1,353 @@
+= STM32 Family CRC Tips
+:toc: preamble
+:source-highlighter: coderay
+:coderay-linenums-mode: table
+
+Many of the microcontrollers in STMicroelectronics' STM32 family have a hardware peripheral to speed up the calculation of CRCs.  Here we will see tips to work around some limitations of these peripherals.
+
+The CRC peripheral on most STM32 microcontrollers:
+
+. calculates a 32-bit CRC;
+. using polynomial `0x04C11DB7`;
+. using initial value `0xFFFFFFFF`;
+. on 32 bits of data at a time;
+. with the data bits processed in the order most-significant to least-significant;
+
+I'll call this the "basic" CRC peripheral.
+
+We are stuck with 32-bit wide CRCs and the given polynomial.  With some ingenuity however, we can efficiently calculate the CRC:
+
+. using any 32-bit initial value;
+. on data which is not a multiple of 4 bytes long, or doesn't start and end at 32-bit word boundaries in memory;
+. on data which, in memory, is stored in the order that bytes or 16-bit halfwords should be processed, rather than 32-bit words;
+. on data which should be processed in least-significant bit to most-significant bit order.
+
+Below you will see how to do all these things.
+
+A few STM32 parts have a more capable CRC peripheral which allows several choices of data width, CRC width and polynomial.  A few of the tips given here may be useful with that peripheral as well.
+
+The maths behind how CRCs work is interesting, but won't be covered here.
+
+== Background
+
+Some variations on a simple algorithm for calculating CRCs are described here.  I use 32-bit CRCs with polynomial `0x04C11DB7`, to match what is done by the basic peripheral.
+
+=== Two Common Shift Register Implementations
+
+CRCs can be calculated using shift registers.  There are two equivalent implementations you're likely to see.  Below is C pseudocode for both of them, which I've called `simpleCRC()` and `cleverCRC()`, as well as some intermediate versions to help show that they are equivalent.
+
+.simpleCRC() (pseudocode)
+[source%linenums,c,options="nowrap"]
+----
+#define POLY 0x04c11db7
+
+uint32_t simpleCRC(data)
+{
+    // *** Sometimes the caller is expected to do this ***
+    append 32 zero bits to the end of data;
+    
+    uint32_t shiftReg = 0;
+    
+    while (there is more data)
+    {
+        // Save most-significant bit of shiftReg
+        uint32_t pop = shiftReg & 0x80000000;
+        
+        shiftReg <<= 1;
+        if (pop)
+        {
+            shiftReg ^= POLY;
+        }
+        
+        // next data bit is 0 or 1, so this only
+        //  affects the least-significant bit:
+        shiftReg ^= next data bit;
+    }
+    
+    return shiftReg;
+}
+----
+
+(Note: in some implementations the caller would be expected to append the 32 zero bits to the end of the data.)
+
+In the first intermediate version we split `shiftReg` into two shift registers `dataReg` and `crcReg`:
+
+.First Intermediate Version (pseudocode)
+[source%linenums,c,options="nowrap"]
+----
+#define POLY 0x04c11db7
+
+uint32_t newCRC1(data)
+{
+    append 32 zero bits to the end of data;
+
+    uint32_t dataReg = 0;
+    uint32_t crcReg  = 0;
+    
+    while (there is more data)
+    {
+        // popData ^ popCrc is equivalent to pop
+        //  from simpleCRC()
+        uint32_t popData = dataReg & 0x80000000;
+        uint32_t popCrc  = crcReg  & 0x80000000;
+        
+        dataReg <<= 1;
+        crcReg  <<= 1;
+        if (popCrc ^ popData)
+        {
+            crcReg ^= POLY;
+        }
+        
+        // next data bit is 0 or 1, so this only
+        //  affects the least-significant bit:
+        dataReg ^= next data bit;
+        
+        // (dataReg ^ crcReg) is equivalent to shiftReg
+        //  from simpleCRC()
+    }
+    
+    return dataReg ^ crcReg;
+}
+----
+
+Notice that `dataReg` only ever has the most recent 32 data bits, and when the loop ends, it contains the 32 zeros we appended to the data at the start.  This means +
+`return dataReg ^ crcReg;` +
+can be replaced by +
+`return crcReg;`
+
+Notice also that during the first 32 iterations of the loop, the first 32 bits of data are shifted into `dataReg`, while popCrc and popData are getting zeros, so crcReg stays at zero.
+
+So we can simplify to:
+
+.Second Intermediate Version (pseudocode)
+[source%linenums,c,options="nowrap"]
+----
+#define POLY 0x04c11db7
+
+uint32_t newCRC2(data)
+{
+    append 32 zero bits to the end of data;
+    
+    uint32_t dataReg = the first 32 bits of data;
+    uint32_t crcReg  = 0;
+    
+    while (there is more data)
+    {
+        uint32_t popData = dataReg & 0x80000000;
+        uint32_t popCrc  = crcReg  & 0x80000000;
+        
+        dataReg <<= 1;
+        crcReg  <<= 1;
+        if (popCrc ^ popData)
+        {
+            crcReg ^= POLY;
+        }
+        
+        // next data bit is 0 or 1, so this only
+        //  affects the least-significant bit:
+        dataReg ^= next data bit;
+    }
+    
+    return crcReg;
+}
+----
+
+Finally, we don't really need to shift the data through `dataReg`, and since `dataReg` otherwise does nothing useful, we can get rid of it and XOR the data bits directly with the bits popping out of `crcReg`.  We also don't need to append the 32 zero bits to the data any more, since they never got to affect the CRC anyway and were there just to push the last 32 data bits out of `dataReg`.
+
+.cleverCRC() (pseudocode)
+[source%linenums,c,options="nowrap"]
+----
+#define POLY 0x04c11db7
+
+uint32_t cleverCRC(data)
+{
+    uint32_t crcReg = 0;
+    
+    while (there is more data)
+    {
+        // We shift the top bit of crcReg down here so it gets
+        //  XORed with the next data bit (which is 0 or 1)
+        uint32_t popCrc = ( (crcReg >> 31) & 1 ) ^ (next data bit);
+        
+        crcReg <<= 1;
+        if (popCrc)
+        {
+            crcReg ^= POLY;
+        }
+    }
+    
+    return crcReg;
+}
+----
+
+=== Common Variations on CRC Computations
+
+==== Polynomial and Width
+
+CRCs may have various widths and be calculated using various polynomials.
+
+==== Initial Value
+
+In `cleverCRC()` above, `crcReg` is initially set to zero.  In practice, a different initial value may be used.  In `simpleCRC()` one could similarly choose a different initial value for `shiftReg`, although I don't know if that's ever done in practice.
+
+==== Bit Order of Input Data
+
+For some CRCs, each byte is fed into the CRC calculation in the order least- to most-significant bit, instead of most- to least-significant.
+
+==== Final Value XOR
+
+Sometimes some fixed value is XORed into the computed CRC to create the final CRC.
+
+==== Bit Order of CRC
+
+The final CRC value may have its bit order reversed, or not.
+
+=== Builtins
+
+In some of the sections below I will suggest using assembly language instructions.
+
+If you're programming in C, your compiler might provide intrinsic (or "builtin") functions to use some assembly instructions.  For example, I'm using STM32CubeIDE Version 1.8.0 (for Debian), which provides the functions `+__REV()+`, `+__ROR()+`, `+__REV16()+` and `+__RBIT()+` to use the corresponding assembly instructions.  These are in the include file `cmsis_gcc.h`.
+
+Note that if your STM32 part doesn't have the corresponding assembly instruction, the function will still work, but without the speed benefit.
+
+If your compiler doesn't provide such functions, it might provide a way to include assembly inline with your C code.
+
+== STM32 Basic CRC Peripheral Implementation
+
+I don't know how the basic CRC peripheral is actually implemented in the STM32 hardware.  However, it gives the same result as if you used `cleverCRC()`, but with the initial value `0xFFFFFFFF` in `crcReg`, and gave it a multiple of 32 bits of data.  The peripheral is used like this:
+
+. Reset the peripheral.  This sets the initial value to `0xFFFFFFFF`.
+. Write data to the peripheral, in order, one 32-bit word at a time.
+. Read the calculated CRC value from the peripheral.
+
+Each word is processed in the order most- to least-significant bit.
+
+Below, I will talk about the peripheral as though the implementation were the same as `cleverCRC()`, to help with explaining how things work.
+
+=== Changing the Initial Value
+
+After resetting the peripheral, `crcReg` contains the initial value `0xFFFFFFFF`.  If you want the initial value to be zero instead, XOR your first data word with `0xFFFFFFFF`, then feed in the altered first word and the rest of your data.  Notice that every '1' bit XORed into your first data word cancels the corresponding '1' bit from the peripheral's initial value when the bits are XORed into `popCrc`.  The result is that the calculated CRC is the same as if `crcReg` had been initialised to zero and you had fed in your data unchanged.
+
+Alternatively, you could write `0xFFFFFFFF` to the peripheral to clear `crcReg` to zero before feeding in your data unaltered.
+
+What about a different initial value than zero or `0xFFFFFFFF`?  XOR both `0xFFFFFFFF` and your desired initial value into your first data word.  Feed in the altered first word and then the rest of your data.  You then get the same result as if the peripheral had been initialised with your desired initial value.  `popCrc` gets the same sequence of values this way as if `crcReg` had been initialised to your desired value; the difference is that the `0xFFFFFFFFs` are cancelling each other and the initial value bits are coming from the first data word instead of from crcReg.
+
+=== Quickly Re-ordering Bytes
+
+STM32s store data in little-endian order.  The bytes of a 16-bit halfword or 32-bit word are stored, in order of increasing address, from least- to most-significant byte.  Halfwords start at even addresses, and words start at addresses divisible by 4.  Since the CRC peripheral takes data as words, you might have to re-order the bytes of each word before feeding it to the peripheral.
+
+For example, suppose in memory you have this byte array:
+[%hardbreaks]
+ address data
+ 0x0100  0x12
+ 0x0101  0x34
+ 0x0102  0x56
+ 0x0103  0x78
+ 0x0104  0x9A
+ 0x0105  0xBC
+ 0x0106  0xDE
+ 0x0107  0xF0
+ 0x0108  0xA6
+ 0x0109  0xB7
+ 0x010A  0xC8
+ 0x010B  0xD9
+
+Read as 32-bit words, this is:
+[%hardbreaks]
+ address data
+ 0x0100  0x78563412
+ 0x0104  0xF0DEBC9A
+ 0x0108  0xD9C8B7A6
+
+The CRC peripheral processes data words from most- to least-significant bit, so if you fed those three words to the peripheral in order, the bytes would get processed in this order: +
+ `0x78, 0x56, 0x34, 0x12, 0xF0, 0xDE, 0xBC, 0x9A, 0xD9, 0xC8, 0xB7, 0xA6`.
+
+What if you need the bytes to be processed in the order that they appear in the byte array; i.e. `0x12, 0x34, .. 0xC8, 0xD9`?  You need to reverse the byte order in each 32-bit word before feeding it to the peripheral.  To do this quickly, use the `REV` instruction built into the STM32's ARM processor core.  The `REV` instruction reverses the order of the bytes in a word.
+
+If you are starting with an array of 16-bit halfwords that you want processed in order, you can use the `ROR` instruction with a shift of 16, which swaps the upper 16 bits with the lower 16 bits.
+
+You might also find the `REV16` instruction useful; it swaps the 2 most-significant bytes and swaps the 2 least-significant bytes.
+
+The "Builtins" section above has some information on using assembly instructions in C code.
+
+=== Reversing Bit Order
+
+If your STM32 has a Cortex-M3, -M4 or -M7 processor core, it has the `RBIT` instruction, which reverses the bit order in a word.  This can be used to reverse the bit order of the final CRC if needed.  It can also be used to reverse the bit order of each data word before giving it to the CRC peripheral.  Depending on the order of your bytes in memory, you might also need to use the `REV`, `ROR` and `REV16` instructions already described to re-order the bytes after doing the bit reversal.
+
+=== Start Address
+
+To get a 32-bit word from memory in a single read, the word must start at a 32-bit word boundary in memory; that is, an address that is a multiple of 4.  If your data doesn't start at a word boundary, you could shift the data, either before or during feeding it to the peripheral.  But there is a faster solution.
+
+In the case where `crcReg` has zero as an initial value, notice that you can feed zero bits into the peripheral without changing its state - `popCrc` keeps getting '0' so `crcReg` stays zero until the first '1' bit is fed in.  We saw in the section "Changing the Initial Value" that writing `0xFFFFFFFF` as the first data word after reset clears `crcReg` to zero.  We also saw that once that is done, we can XOR any desired initial value into the first 32 bits of data.  So do this:
+
+. Reset the peripheral and feed it `0xFFFFFFFF` to clear `crcReg` to zero;
+. If you require an initial value other than zero, XOR it into your first 4 data bytes;
+. Take the first 1, 2 or 3 data bytes before the first word boundary, and put them in the least-significant bytes of a 32-bit word.  Fill the remaining bytes of the word with zeros, then write that word to the peripheral;
+. The remaining data starts at a word boundary, so continue reading the data from memory as words.
+
+For example, suppose in memory you have this byte array:
+[%hardbreaks]
+ address data
+ 0x0101  0x12
+ 0x0102  0x34
+ 0x0103  0x56
+ 0x0104  0x78
+ 0x0105  0x9A
+ 0x0106  0xBC
+ 0x0107  0xDE
+ 0x0108  0xF0
+ 0x0109  0xA6
+ 0x010A  0xB7
+ 0x010B  0xC8
+
+Suppose also that you want to process the bytes in their in-memory order, and to start with the initial value `0x55443322`.
+
+You would do this:
+
+. Reset the peripheral, and write `0xFFFFFFFF` to it;
+. Take the first 3 bytes, put them in order and prepend a zero byte, giving `0x00123456`;
+. XOR that result with the initial value `0x55443322`, giving `0x55560774`; write that to the peripheral;
+. For the remainder of the data, read each 32-bit word from memory, reverse the order of the bytes, and write it to the peripheral;
+. Read the calculated CRC from the peripheral.
+
+=== End Address
+
+If your data doesn't end at a word boundary in memory, then after you've transferred the last full word to the CRC peripheral you will have 1, 2 or 3 bytes left.  The way to deal with them is as follows:
+
+. Read the CRC calculated so far out of the CRC peripheral;
+. Write that value back to the CRC peripheral to clear it to zero;
+. Let n be the number of remaining bytes: 1, 2 or 3;
+. Take the remaining n data bytes, XOR them with the n most-significant bytes of the CRC from step 1, and put the result in the least-significant bytes of a 32-bit word.  Fill the remaining bytes of the word with zeros, then write that word to the peripheral;
+. Read the new CRC value from the peripheral, left-shift the CRC value from step 1. by n*8 bits, and XOR those two values together.  This is your final CRC.
+
+The zeros prepended to the n-byte value written to the CRC peripheral in step 4. have no effect since the CRC peripheral had been cleared to zero.  The CRC calculated in step 4. then shows the new bits that go into `crcReg` as the last n*8 data bits are processed.  The XOR of that with what was in `crcReg` before processing the last n*8 bits then gives us the correct CRC.
+
+An example: suppose in memory you have this byte array:
+[%hardbreaks]
+ address data
+ 0x0100  0x12
+ 0x0101  0x34
+ 0x0102  0x56
+ 0x0103  0x78
+ 0x0104  0x9A
+ 0x0105  0xBC
+ 0x0106  0xDE
+ 0x0107  0xF0
+ 0x0108  0xA6
+ 0x0109  0xB7
+ 0x010A  0xC8
+
+Suppost also that you want to process the bytes in their in-memory order, and to start with the default initial value `0xFFFFFFFF`.
+
+You would do this:
+
+. Reset the peripheral, which sets the initial value `0xFFFFFFFF`;
+. For the first two words of data, read each word from memory, reverse the order of the bytes, and write it to the peripheral;
+. Read the CRC calculated so far out of the CRC peripheral.  You would get `0x7D24A31B`;
+. Write that value back to the peripheral to clear it to zero;
+. Take the 3 most-significant bytes of the CRC you read (`0x7D`, `0x24`, `0xA3`) and XOR them with the remaining 3 bytes of data in order (`0xA6`, `0xB7`, `0xC8`), then put the result in the 3 least-significant bytes of a word, with 0 in the other byte: `0x00DB936B`.  Write that word to the CRC peripheral;
+. Shift the CRC from step 3. left by 3*8 bits (`0x1B000000`), read the new CRC from the peripheral (`0xEC832A2F`), and XOR those together to get the final CRC: `0xF7832A2F`.
+
+=== Length of Data Not a Multiple of 32 Bits
+
+The CRC peripheral takes data 32-bits at a time.  What if the length of your data isn't a multiple of 4?  Then either your data doesn't start at a word boundary in memory, or it doesn't end at a word boundary in memory.  We've seen how to work with both of those cases in the two previous sections.
