@@ -518,6 +518,7 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 <li><a href="#_start_address">Start Address</a></li>
 <li><a href="#_end_address">End Address</a></li>
 <li><a href="#_length_of_data_not_a_multiple_of_32_bits">Length of Data Not a Multiple of 32 Bits</a></li>
+<li><a href="#_demo_code">DEMO CODE</a></li>
 </ul>
 </li>
 </ul>
@@ -1095,6 +1096,9 @@ uint32_t cleverCRC(data)
 </li>
 </ol>
 </div>
+<div class="paragraph">
+<p>You could also use this technique when calculating a CRC piecewise, when any piece of the data is given starting or ending on an address that is not a multiple of 4.  See the "DEMO CODE" section below.</p>
+</div>
 </div>
 <div class="sect2">
 <h3 id="_length_of_data_not_a_multiple_of_32_bits">Length of Data Not a Multiple of 32 Bits</h3>
@@ -1102,12 +1106,24 @@ uint32_t cleverCRC(data)
 <p>The CRC peripheral takes data 32-bits at a time.  What if the length of your data isn&#8217;t a multiple of 4?  Then either your data doesn&#8217;t start at a word boundary in memory, or it doesn&#8217;t end at a word boundary in memory.  We&#8217;ve seen how to work with both of those cases in the two previous sections.</p>
 </div>
 </div>
+<div class="sect2">
+<h3 id="_demo_code">DEMO CODE</h3>
+<div class="paragraph">
+<p>You can find some demonstration code <a href="https://github.com/clinton-r/stm32crc_tricks/blob/main/crc32_demo.c">here</a>.</p>
+</div>
+<div class="paragraph">
+<p>The demo code shows how you could use the STM32 basic peripheral to calculate a CRC piecewise, in byte order, with a configurable initial value.</p>
+</div>
+<div class="paragraph">
+<p>Where data is given starting or ending at an address that is not a multiple of 4, the demo code uses the technique described in the "End Address" section above to process 1, 2 or 3 bytes at a time.</p>
+</div>
+</div>
 </div>
 </div>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2022-05-12 14:06:33 -0600
+Last updated 2022-09-24 20:32:22 -0600
 </div>
 </div>
 <style>

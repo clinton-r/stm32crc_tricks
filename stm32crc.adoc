@@ -348,6 +348,16 @@ You would do this:
 . Take the 3 most-significant bytes of the CRC you read (`0x7D`, `0x24`, `0xA3`) and XOR them with the remaining 3 bytes of data in order (`0xA6`, `0xB7`, `0xC8`), then put the result in the 3 least-significant bytes of a word, with 0 in the other byte: `0x00DB936B`.  Write that word to the CRC peripheral;
 . Shift the CRC from step 3. left by 3*8 bits (`0x1B000000`), read the new CRC from the peripheral (`0xEC832A2F`), and XOR those together to get the final CRC: `0xF7832A2F`.
 
+You could also use this technique when calculating a CRC piecewise, when any piece of the data is given starting or ending on an address that is not a multiple of 4.  See the "DEMO CODE" section below.
+
 === Length of Data Not a Multiple of 32 Bits
 
 The CRC peripheral takes data 32-bits at a time.  What if the length of your data isn't a multiple of 4?  Then either your data doesn't start at a word boundary in memory, or it doesn't end at a word boundary in memory.  We've seen how to work with both of those cases in the two previous sections.
+
+=== DEMO CODE
+
+You can find some demonstration code https://github.com/clinton-r/stm32crc_tricks/blob/main/crc32_demo.c[here].
+
+The demo code shows how you could use the STM32 basic peripheral to calculate a CRC piecewise, in byte order, with a configurable initial value.
+
+Where data is given starting or ending at an address that is not a multiple of 4, the demo code uses the technique described in the "End Address" section above to process 1, 2 or 3 bytes at a time.
